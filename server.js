@@ -12,7 +12,9 @@ const io = new Server(server, {
         methods: ['GET', 'POST'],
         credentials: true
     },
-    transports: ['websocket', 'polling']
+    transports: ['websocket', 'polling'],
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
 
 app.use(cors());
@@ -157,6 +159,7 @@ function cleanupRoom(roomId) {
     const room = gameRooms.get(roomId);
     if (room && room.isEmpty()) {
         gameRooms.delete(roomId);
+        console.log(`Room ${roomId} cleaned up`);
     }
 }
 
@@ -164,34 +167,22 @@ io.on('connection', (socket) => {
     console.log(`User connected: ${socket.id}`);
 
     socket.on('joinQueue', ({ username }) => {
-        waitingQueue.push({ socketId: socket.id, username });
+        waitingQueue.push({ socketId: socket.id, username, joinTime: Date.now() });
         socket.emit('queueJoined', { queuePosition: waitingQueue.length });
+        console.log(`Player ${username} (${socket.id}) joined queue. Queue size: ${waitingQueue.length}`);
+        tryMatchPlayers();
+    });
 
-        if (waitingQueue.length >= 2) {
-            const [player1, player2] = waitingQueue.splice(0, 2);
-            const roomId = generateRoomId();
-            const room = new GameRoom(roomId);
-            room.addPlayer(player1.socketId, player1.username);
-            room.addPlayer(player2.socketId, player2.username);
-            gameRooms.set(roomId, room);
-            playerSocketMap.set(player1.socketId, roomId);
-            playerSocketMap.set(player2.socketId, roomId);
-            io.to(player1.socketId).join(roomId);
-            io.to(player2.socketId).join(roomId);
-            io.to(roomId).emit('matchFound', { roomId, players: room.getAllPlayers() });
+    socket.on('checkQueuePosition', () => {
+        const position = waitingQueue.findIndex(p => p.socketId === socket.id) + 1;
+        socket.emit('queuePositionUpdate', { queuePosition: position || 1 });
+    });
 
-            setTimeout(() => {
-                room.startGame();
-                io.to(roomId).emit('gameStart', { question: room.currentQuestion });
-                const timer = setInterval(() => {
-                    if (room.isGameTimeUp()) {
-                        clearInterval(timer);
-                        endGame(roomId);
-                    } else {
-                        io.to(roomId).emit('timeUpdate', { remainingTime: room.getRemainingTime() });
-                    }
-                }, 1000);
-            }, 5000);
+    socket.on('cancelQueue', () => {
+        const index = waitingQueue.findIndex(p => p.socketId === socket.id);
+        if (index !== -1) {
+            waitingQueue.splice(index, 1);
+            console.log(`Player ${socket.id} cancelled queue. Queue size: ${waitingQueue.length}`);
         }
     });
 
@@ -212,7 +203,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('voiceOffer', async ({ offer }) => {
+    socket.on('voiceOffer', async ({ offer, from }) => {
         const roomId = playerSocketMap.get(socket.id);
         socket.to(roomId).emit('voiceOffer', { offer, from: socket.id });
     });
@@ -232,6 +223,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('disconnect', () => {
+        console.log(`User disconnected: ${socket.id}`);
         const roomId = playerSocketMap.get(socket.id);
         if (roomId) {
             const room = gameRooms.get(roomId);
@@ -242,9 +234,44 @@ io.on('connection', (socket) => {
             }
             playerSocketMap.delete(socket.id);
         }
-        waitingQueue.splice(waitingQueue.findIndex(p => p.socketId === socket.id), 1);
+        const index = waitingQueue.findIndex(p => p.socketId === socket.id);
+        if (index !== -1) {
+            waitingQueue.splice(index, 1);
+            console.log(`Player ${socket.id} removed from queue. Queue size: ${waitingQueue.length}`);
+        }
+        tryMatchPlayers();
     });
 });
+
+function tryMatchPlayers() {
+    if (waitingQueue.length >= 2) {
+        const [player1, player2] = waitingQueue.splice(0, 2);
+        const roomId = generateRoomId();
+        const room = new GameRoom(roomId);
+        room.addPlayer(player1.socketId, player1.username);
+        room.addPlayer(player2.socketId, player2.username);
+        gameRooms.set(roomId, room);
+        playerSocketMap.set(player1.socketId, roomId);
+        playerSocketMap.set(player2.socketId, roomId);
+        io.to(player1.socketId).join(roomId);
+        io.to(player2.socketId).join(roomId);
+        io.to(roomId).emit('matchFound', { roomId, players: room.getAllPlayers() });
+        console.log(`Match created: ${player1.username} vs ${player2.username} in room ${roomId}`);
+
+        setTimeout(() => {
+            room.startGame();
+            io.to(roomId).emit('gameStart', { question: room.currentQuestion });
+            const timer = setInterval(() => {
+                if (room.isGameTimeUp()) {
+                    clearInterval(timer);
+                    endGame(roomId);
+                } else {
+                    io.to(roomId).emit('timeUpdate', { remainingTime: room.getRemainingTime() });
+                }
+            }, 1000);
+        }, 5000);
+    }
+}
 
 function endGame(roomId) {
     const room = gameRooms.get(roomId);
@@ -259,4 +286,18 @@ function endGame(roomId) {
 }
 
 app.get('/', (req, res) => res.json({ status: 'Server Running', activeRooms: gameRooms.size }));
-server.listen(process.env.PORT || 3000, () => console.log('Server running'));
+
+server.listen(process.env.PORT || 3000, () => {
+    console.log(`Server running on port ${process.env.PORT || 3000}`);
+});
+
+// Periodic Queue Cleanup
+setInterval(() => {
+    const now = Date.now();
+    for (let i = waitingQueue.length - 1; i >= 0; i--) {
+        if (now - waitingQueue[i].joinTime > 300000) {
+            waitingQueue.splice(i, 1);
+        }
+    }
+    tryMatchPlayers();
+}, 10000);
