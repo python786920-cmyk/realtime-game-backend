@@ -10,7 +10,7 @@ const server = http.createServer(app);
 // CORS configuration for frontend connection
 const io = socketIo(server, {
     cors: {
-        origin: "*", // Replace with your frontend domain in production
+        origin: "https://cashearnersofficial.xyz", // Replace with your frontend domain in production
         methods: ["GET", "POST"],
         credentials: true
     }
