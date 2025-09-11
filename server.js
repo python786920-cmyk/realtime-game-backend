@@ -1,3 +1,4 @@
+// server.js - Complete Backend for Math Quiz Game
 const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
@@ -5,409 +6,425 @@ const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
+
+// CORS configuration for frontend connection
 const io = socketIo(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"]
-  }
+    cors: {
+        origin: "*", // Replace with your frontend domain
+        methods: ["GET", "POST"],
+        credentials: true
+    }
 });
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Game state management
-let waitingQueue = [];
-let activeGames = new Map();
-let connectedUsers = new Map();
+// Global variables
+let waitingQueue = []; // Players waiting for match
+let activeRooms = new Map(); // roomId -> room data
+let playerRooms = new Map(); // socketId -> roomId
 
-// Question generator - Simple math questions
-const generateQuestion = () => {
-  const operators = ['+', '-', '*'];
-  const operator = operators[Math.floor(Math.random() * operators.length)];
-  
-  let num1, num2, correctAnswer;
-  
-  switch(operator) {
-    case '+':
-      num1 = Math.floor(Math.random() * 50) + 1;
-      num2 = Math.floor(Math.random() * 50) + 1;
-      correctAnswer = num1 + num2;
-      break;
-    case '-':
-      num1 = Math.floor(Math.random() * 50) + 25;
-      num2 = Math.floor(Math.random() * 25) + 1;
-      correctAnswer = num1 - num2;
-      break;
-    case '*':
-      num1 = Math.floor(Math.random() * 12) + 1;
-      num2 = Math.floor(Math.random() * 12) + 1;
-      correctAnswer = num1 * num2;
-      break;
-  }
-  
-  const question = `${num1} ${operator} ${num2} = ?`;
-  
-  // Generate 3 wrong options
-  const options = [correctAnswer];
-  while(options.length < 4) {
-    let wrongOption;
-    if(operator === '*') {
-      wrongOption = correctAnswer + Math.floor(Math.random() * 10) - 5;
-    } else {
-      wrongOption = correctAnswer + Math.floor(Math.random() * 20) - 10;
-    }
+// Question Generator
+function generateQuestion() {
+    const a = Math.floor(Math.random() * 50) + 1;
+    const b = Math.floor(Math.random() * 50) + 1;
+    const correctAnswer = a + b;
     
-    if(wrongOption !== correctAnswer && wrongOption > 0 && !options.includes(wrongOption)) {
-      options.push(wrongOption);
-    }
-  }
-  
-  // Shuffle options
-  for(let i = options.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [options[i], options[j]] = [options[j], options[i]];
-  }
-  
-  return {
-    id: Date.now() + Math.random(),
-    question,
-    options,
-    correctAnswer,
-    timestamp: Date.now()
-  };
-};
-
-// Game class
-class Game {
-  constructor(player1, player2) {
-    this.id = Date.now() + Math.random();
-    this.players = {
-      [player1.id]: {
-        socket: player1,
-        score: 0,
-        answered: false,
-        username: player1.username
-      },
-      [player2.id]: {
-        socket: player2,
-        score: 0,
-        answered: false,
-        username: player2.username
-      }
-    };
-    this.currentQuestion = null;
-    this.gameStarted = false;
-    this.gameEnded = false;
-    this.startTime = null;
-    this.gameDuration = 120000; // 2 minutes
-    this.questionTimer = null;
-    this.gameTimer = null;
-  }
-
-  start() {
-    this.gameStarted = true;
-    this.startTime = Date.now();
-    
-    // Notify both players game is starting
-    Object.values(this.players).forEach(player => {
-      player.socket.emit('gameStarted', {
-        gameId: this.id,
-        opponent: Object.values(this.players).find(p => p.socket.id !== player.socket.id).username,
-        duration: this.gameDuration
-      });
-    });
-
-    // Start countdown
-    this.startCountdown();
-  }
-
-  startCountdown() {
-    let countdown = 5;
-    const countdownInterval = setInterval(() => {
-      Object.values(this.players).forEach(player => {
-        player.socket.emit('countdown', countdown);
-      });
-      
-      countdown--;
-      if(countdown < 0) {
-        clearInterval(countdownInterval);
-        this.sendNextQuestion();
-        this.startGameTimer();
-      }
-    }, 1000);
-  }
-
-  startGameTimer() {
-    this.gameTimer = setTimeout(() => {
-      this.endGame();
-    }, this.gameDuration);
-  }
-
-  sendNextQuestion() {
-    if(this.gameEnded) return;
-    
-    this.currentQuestion = generateQuestion();
-    
-    // Reset answered status
-    Object.values(this.players).forEach(player => {
-      player.answered = false;
-    });
-
-    // Send question to both players
-    Object.values(this.players).forEach(player => {
-      player.socket.emit('newQuestion', {
-        id: this.currentQuestion.id,
-        question: this.currentQuestion.question,
-        options: this.currentQuestion.options,
-        timeRemaining: this.getRemainingTime()
-      });
-    });
-  }
-
-  handleAnswer(playerId, answer) {
-    if(this.gameEnded || !this.currentQuestion) return;
-    
-    const player = this.players[playerId];
-    if(!player || player.answered) return;
-
-    player.answered = true;
-    
-    // Check if answer is correct
-    const isCorrect = answer === this.currentQuestion.correctAnswer;
-    if(isCorrect) {
-      player.score += 1;
-    }
-
-    // Send result to the player who answered
-    player.socket.emit('answerResult', {
-      correct: isCorrect,
-      correctAnswer: this.currentQuestion.correctAnswer,
-      yourScore: player.score,
-      opponentScore: Object.values(this.players).find(p => p.socket.id !== player.socket.id).score
-    });
-
-    // Update scores for both players
-    this.broadcastScores();
-
-    // Check if both players have answered
-    const bothAnswered = Object.values(this.players).every(p => p.answered);
-    
-    if(bothAnswered) {
-      // Wait a moment then send next question
-      setTimeout(() => {
-        this.sendNextQuestion();
-      }, 1500);
-    } else {
-      // Wait for other player or timeout after 10 seconds
-      setTimeout(() => {
-        if(!Object.values(this.players).every(p => p.answered)) {
-          this.sendNextQuestion();
+    // Generate 3 wrong answers
+    const wrongAnswers = [];
+    while (wrongAnswers.length < 3) {
+        const wrong = correctAnswer + Math.floor(Math.random() * 20) - 10;
+        if (wrong !== correctAnswer && wrong > 0 && !wrongAnswers.includes(wrong)) {
+            wrongAnswers.push(wrong);
         }
-      }, 10000);
     }
-  }
-
-  broadcastScores() {
-    const scores = {};
-    Object.entries(this.players).forEach(([id, player]) => {
-      scores[player.username] = player.score;
-    });
-
-    Object.values(this.players).forEach(player => {
-      const opponent = Object.values(this.players).find(p => p.socket.id !== player.socket.id);
-      player.socket.emit('scoreUpdate', {
-        yourScore: player.score,
-        opponentScore: opponent.score,
-        yourName: player.username,
-        opponentName: opponent.username
-      });
-    });
-  }
-
-  getRemainingTime() {
-    if(!this.startTime) return this.gameDuration;
-    return Math.max(0, this.gameDuration - (Date.now() - this.startTime));
-  }
-
-  endGame() {
-    if(this.gameEnded) return;
     
-    this.gameEnded = true;
-    
-    if(this.gameTimer) clearTimeout(this.gameTimer);
-    if(this.questionTimer) clearTimeout(this.questionTimer);
-
-    // Determine winner
-    const playerArray = Object.values(this.players);
-    const player1 = playerArray[0];
-    const player2 = playerArray[1];
-    
-    let result;
-    if(player1.score > player2.score) {
-      result = {
-        winner: player1.username,
-        loser: player2.username,
-        winnerScore: player1.score,
-        loserScore: player2.score
-      };
-    } else if(player2.score > player1.score) {
-      result = {
-        winner: player2.username,
-        loser: player1.username,
-        winnerScore: player2.score,
-        loserScore: player1.score
-      };
-    } else {
-      result = {
-        winner: null,
-        tie: true,
-        player1: player1.username,
-        player2: player2.username,
-        score: player1.score
-      };
+    // Combine and shuffle options
+    const options = [correctAnswer, ...wrongAnswers];
+    for (let i = options.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [options[i], options[j]] = [options[j], options[i]];
     }
-
-    // Send results to both players
-    Object.values(this.players).forEach(player => {
-      const isWinner = result.winner === player.username;
-      const opponent = Object.values(this.players).find(p => p.socket.id !== player.socket.id);
-      
-      player.socket.emit('gameEnded', {
-        result: result.tie ? 'tie' : (isWinner ? 'win' : 'lose'),
-        yourScore: player.score,
-        opponentScore: opponent.score,
-        winner: result.winner,
-        tie: result.tie
-      });
-    });
-
-    // Clean up
-    activeGames.delete(this.id);
-  }
-
-  handlePlayerDisconnect(playerId) {
-    const disconnectedPlayer = this.players[playerId];
-    if(!disconnectedPlayer) return;
-
-    const remainingPlayer = Object.values(this.players).find(p => p.socket.id !== playerId);
     
-    if(remainingPlayer) {
-      remainingPlayer.socket.emit('opponentDisconnected');
-    }
-
-    this.endGame();
-  }
+    return {
+        question: `${a} + ${b} = ?`,
+        options: options,
+        correctAnswer: correctAnswer,
+        questionNumber: 1 // Will be updated when sent
+    };
 }
 
-// Socket connection handling
-io.on('connection', (socket) => {
-  console.log('User connected:', socket.id);
+// Generate question sequence for a room
+function generateQuestionSequence(count = 50) {
+    const questions = [];
+    for (let i = 0; i < count; i++) {
+        const q = generateQuestion();
+        q.questionNumber = i + 1;
+        questions.push(q);
+    }
+    return questions;
+}
 
-  // Handle user joining
-  socket.on('joinGame', (data) => {
-    const username = data.username || `Player${Math.floor(Math.random() * 1000)}`;
+// Create new room
+function createRoom(player1, player2) {
+    const roomId = 'room_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
     
-    connectedUsers.set(socket.id, {
-      id: socket.id,
-      username,
-      socket
+    const room = {
+        id: roomId,
+        players: [
+            {
+                socketId: player1.id,
+                username: player1.username,
+                score: 0,
+                currentQuestion: 1,
+                isConnected: true
+            },
+            {
+                socketId: player2.id,
+                username: player2.username,
+                score: 0,
+                currentQuestion: 1,
+                isConnected: true
+            }
+        ],
+        questions: generateQuestionSequence(),
+        gameStarted: false,
+        gameEnded: false,
+        timer: 120, // 2 minutes in seconds
+        timerInterval: null,
+        createdAt: Date.now()
+    };
+    
+    activeRooms.set(roomId, room);
+    playerRooms.set(player1.id, roomId);
+    playerRooms.set(player2.id, roomId);
+    
+    // Join socket rooms
+    player1.join(roomId);
+    player2.join(roomId);
+    
+    return room;
+}
+
+// Start game timer
+function startGameTimer(roomId) {
+    const room = activeRooms.get(roomId);
+    if (!room) return;
+    
+    room.timerInterval = setInterval(() => {
+        room.timer--;
+        
+        // Send timer update to both players
+        io.to(roomId).emit('timeUpdate', { timeLeft: room.timer });
+        
+        // Game over when timer reaches 0
+        if (room.timer <= 0) {
+            endGame(roomId);
+        }
+    }, 1000);
+}
+
+// End game
+function endGame(roomId) {
+    const room = activeRooms.get(roomId);
+    if (!room || room.gameEnded) return;
+    
+    room.gameEnded = true;
+    if (room.timerInterval) {
+        clearInterval(room.timerInterval);
+    }
+    
+    const [player1, player2] = room.players;
+    let result;
+    
+    if (player1.score > player2.score) {
+        result = {
+            winner: player1.username,
+            loser: player2.username,
+            winnerScore: player1.score,
+            loserScore: player2.score,
+            isDraw: false
+        };
+    } else if (player2.score > player1.score) {
+        result = {
+            winner: player2.username,
+            loser: player1.username,
+            winnerScore: player2.score,
+            loserScore: player1.score,
+            isDraw: false
+        };
+    } else {
+        result = {
+            winner: null,
+            loser: null,
+            winnerScore: player1.score,
+            loserScore: player2.score,
+            isDraw: true
+        };
+    }
+    
+    // Send game over event to both players
+    io.to(roomId).emit('gameOver', {
+        result: result,
+        finalScores: {
+            [player1.username]: player1.score,
+            [player2.username]: player2.score
+        }
     });
+    
+    // Clean up room after 30 seconds
+    setTimeout(() => {
+        cleanupRoom(roomId);
+    }, 30000);
+}
 
-    socket.emit('joinedSuccessfully', { username });
-  });
-
-  // Handle matchmaking
-  socket.on('findMatch', () => {
-    const user = connectedUsers.get(socket.id);
-    if(!user) return;
-
-    // Add to waiting queue
-    waitingQueue.push(user);
-    socket.emit('searchingMatch');
-
-    // Try to match with someone
-    if(waitingQueue.length >= 2) {
-      const player1 = waitingQueue.shift();
-      const player2 = waitingQueue.shift();
-
-      // Create new game
-      const game = new Game(player1, player2);
-      activeGames.set(game.id, game);
-
-      // Notify players match found
-      player1.socket.emit('matchFound', { opponent: player2.username });
-      player2.socket.emit('matchFound', { opponent: player1.username });
-
-      // Start game after 2 seconds
-      setTimeout(() => {
-        game.start();
-      }, 2000);
+// Clean up room
+function cleanupRoom(roomId) {
+    const room = activeRooms.get(roomId);
+    if (!room) return;
+    
+    if (room.timerInterval) {
+        clearInterval(room.timerInterval);
     }
-  });
-
-  // Handle answer submission
-  socket.on('submitAnswer', (data) => {
-    // Find which game this player is in
-    const game = Array.from(activeGames.values()).find(g => 
-      g.players[socket.id]
-    );
     
-    if(game) {
-      game.handleAnswer(socket.id, data.answer);
-    }
-  });
-
-  // Handle disconnection
-  socket.on('disconnect', () => {
-    console.log('User disconnected:', socket.id);
+    room.players.forEach(player => {
+        playerRooms.delete(player.socketId);
+    });
     
-    // Remove from waiting queue
-    waitingQueue = waitingQueue.filter(user => user.id !== socket.id);
-    
-    // Handle game disconnection
-    const game = Array.from(activeGames.values()).find(g => 
-      g.players[socket.id]
-    );
-    
-    if(game) {
-      game.handlePlayerDisconnect(socket.id);
-    }
+    activeRooms.delete(roomId);
+}
 
-    // Remove from connected users
-    connectedUsers.delete(socket.id);
-  });
-
-  // Handle cancel search
-  socket.on('cancelSearch', () => {
-    waitingQueue = waitingQueue.filter(user => user.id !== socket.id);
-    socket.emit('searchCancelled');
-  });
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+    console.log(`Player connected: ${socket.id}`);
+    
+    // Join queue for matchmaking
+    socket.on('joinQueue', (data) => {
+        const { username } = data;
+        const player = {
+            id: socket.id,
+            username: username || `Guest_${socket.id.substr(0, 6)}`,
+            socket: socket
+        };
+        
+        // Check if someone is already waiting
+        if (waitingQueue.length > 0) {
+            const opponent = waitingQueue.shift();
+            
+            // Create room and match players
+            const room = createRoom(opponent, player);
+            
+            // Notify both players about match found
+            io.to(room.id).emit('matchFound', {
+                roomId: room.id,
+                opponent: {
+                    [opponent.id]: player.username,
+                    [player.id]: opponent.username
+                },
+                countdown: 5
+            });
+            
+            // Start countdown then game
+            setTimeout(() => {
+                if (activeRooms.has(room.id)) {
+                    room.gameStarted = true;
+                    startGameTimer(room.id);
+                    
+                    // Send game start event
+                    io.to(room.id).emit('gameStart', {
+                        message: 'Game Started!',
+                        timer: room.timer
+                    });
+                    
+                    // Send first question to both players
+                    const firstQuestion = room.questions[0];
+                    io.to(room.id).emit('newQuestion', firstQuestion);
+                }
+            }, 5000);
+            
+        } else {
+            // Add to waiting queue
+            waitingQueue.push(player);
+            socket.emit('waitingForOpponent', { 
+                message: 'Looking for opponent...',
+                position: waitingQueue.length 
+            });
+        }
+    });
+    
+    // Handle answer submission
+    socket.on('submitAnswer', (data) => {
+        const roomId = playerRooms.get(socket.id);
+        const room = activeRooms.get(roomId);
+        
+        if (!room || room.gameEnded) return;
+        
+        const playerIndex = room.players.findIndex(p => p.socketId === socket.id);
+        if (playerIndex === -1) return;
+        
+        const player = room.players[playerIndex];
+        const currentQuestionIndex = player.currentQuestion - 1;
+        
+        if (currentQuestionIndex >= room.questions.length) return;
+        
+        const question = room.questions[currentQuestionIndex];
+        const isCorrect = data.answer === question.correctAnswer;
+        
+        // Update score if correct
+        if (isCorrect) {
+            player.score++;
+        }
+        
+        // Send answer result to the player
+        socket.emit('answerResult', {
+            correct: isCorrect,
+            correctAnswer: question.correctAnswer,
+            yourAnswer: data.answer
+        });
+        
+        // Update scoreboard for both players
+        const scoreUpdate = {};
+        room.players.forEach(p => {
+            scoreUpdate[p.username] = p.score;
+        });
+        
+        io.to(roomId).emit('updateScore', scoreUpdate);
+        
+        // Move to next question for this player
+        player.currentQuestion++;
+        
+        // Send next question to this player only
+        const nextQuestionIndex = player.currentQuestion - 1;
+        if (nextQuestionIndex < room.questions.length) {
+            const nextQuestion = room.questions[nextQuestionIndex];
+            socket.emit('newQuestion', nextQuestion);
+        } else {
+            socket.emit('noMoreQuestions', { message: 'No more questions available!' });
+        }
+    });
+    
+    // WebRTC Signaling for Voice Chat
+    socket.on('webrtcOffer', (data) => {
+        const roomId = playerRooms.get(socket.id);
+        if (roomId) {
+            socket.to(roomId).emit('webrtcOffer', {
+                offer: data.offer,
+                from: socket.id
+            });
+        }
+    });
+    
+    socket.on('webrtcAnswer', (data) => {
+        const roomId = playerRooms.get(socket.id);
+        if (roomId) {
+            socket.to(roomId).emit('webrtcAnswer', {
+                answer: data.answer,
+                from: socket.id
+            });
+        }
+    });
+    
+    socket.on('webrtcIce', (data) => {
+        const roomId = playerRooms.get(socket.id);
+        if (roomId) {
+            socket.to(roomId).emit('webrtcIce', {
+                ice: data.ice,
+                from: socket.id
+            });
+        }
+    });
+    
+    // Handle disconnection
+    socket.on('disconnect', () => {
+        console.log(`Player disconnected: ${socket.id}`);
+        
+        // Remove from waiting queue if present
+        const queueIndex = waitingQueue.findIndex(p => p.id === socket.id);
+        if (queueIndex !== -1) {
+            waitingQueue.splice(queueIndex, 1);
+        }
+        
+        // Handle room disconnection
+        const roomId = playerRooms.get(socket.id);
+        if (roomId) {
+            const room = activeRooms.get(roomId);
+            if (room) {
+                const playerIndex = room.players.findIndex(p => p.socketId === socket.id);
+                if (playerIndex !== -1) {
+                    room.players[playerIndex].isConnected = false;
+                    
+                    // Notify other player about disconnection
+                    socket.to(roomId).emit('opponentDisconnected', {
+                        message: 'Opponent disconnected'
+                    });
+                    
+                    // End game if both players disconnected or game is active
+                    if (room.gameStarted && !room.gameEnded) {
+                        endGame(roomId);
+                    }
+                }
+            }
+        }
+    });
+    
+    // Handle leave game
+    socket.on('leaveGame', () => {
+        const roomId = playerRooms.get(socket.id);
+        if (roomId) {
+            socket.to(roomId).emit('opponentLeft', {
+                message: 'Opponent left the game'
+            });
+            
+            const room = activeRooms.get(roomId);
+            if (room && !room.gameEnded) {
+                endGame(roomId);
+            }
+        }
+    });
 });
 
 // Health check endpoint
 app.get('/', (req, res) => {
-  res.json({ 
-    status: 'Quiz Battle Server Running',
-    connectedUsers: connectedUsers.size,
-    activeGames: activeGames.size,
-    waitingQueue: waitingQueue.length
-  });
+    res.json({
+        status: 'Math Quiz Game Server Running',
+        timestamp: new Date().toISOString(),
+        activeRooms: activeRooms.size,
+        waitingPlayers: waitingQueue.length
+    });
 });
 
-// Start server
+// Stats endpoint
+app.get('/stats', (req, res) => {
+    res.json({
+        activeRooms: activeRooms.size,
+        waitingPlayers: waitingQueue.length,
+        totalConnections: io.engine.clientsCount
+    });
+});
+
+// Cleanup inactive rooms every 5 minutes
+setInterval(() => {
+    const now = Date.now();
+    const roomsToDelete = [];
+    
+    activeRooms.forEach((room, roomId) => {
+        // Remove rooms older than 10 minutes or completed games older than 2 minutes
+        const roomAge = now - room.createdAt;
+        if (roomAge > 600000 || (room.gameEnded && roomAge > 120000)) {
+            roomsToDelete.push(roomId);
+        }
+    });
+    
+    roomsToDelete.forEach(roomId => {
+        cleanupRoom(roomId);
+    });
+    
+    console.log(`Cleaned up ${roomsToDelete.length} inactive rooms`);
+}, 300000);
+
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`Quiz Battle Server running on port ${PORT}`);
+    console.log(`🚀 Math Quiz Game Server running on port ${PORT}`);
+    console.log(`🎮 Game features: Matchmaking, Voice Chat, Real-time Quiz`);
 });
-
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  console.log('SIGTERM received. Shutting down gracefully...');
-  server.close(() => {
-    console.log('Server closed.');
-    process.exit(0);
-  });
-});
-
-module.exports = app;
