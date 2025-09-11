@@ -8,6 +8,16 @@
     "dev": "nodemon server.js",
     "test": "node test.js"
   },
+  "keywords": [
+    "realtime",
+    "multiplayer",
+    "game",
+    "websocket",
+    "socket.io",
+    "nodejs"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
   "dependencies": {
     "express": "^4.18.2",
     "socket.io": "^4.7.4",
@@ -20,5 +30,9 @@
   "engines": {
     "node": ">=16.0.0",
     "npm": ">=8.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "your-repo-url"
   }
 }
