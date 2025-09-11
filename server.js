@@ -100,9 +100,9 @@ function createRoom(player1, player2) {
     playerRooms.set(player1.id, roomId);
     playerRooms.set(player2.id, roomId);
     
-    // Join socket rooms
-    player1.join(roomId);
-    player2.join(roomId);
+    // Join socket rooms - use the socket property
+    player1.socket.join(roomId);
+    player2.socket.join(roomId);
     
     return room;
 }
