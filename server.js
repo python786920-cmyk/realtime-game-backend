@@ -27,7 +27,7 @@ const dbConfig = {
 };
 
 const pool = mysql.createPool(dbConfig);
-const JWT_SECRET = 'your_jwt_secret_key'; // Replace with secure key
+const JWT_SECRET = '7fd81c2aa5c17cb969e6e0c0bba03e35e49f84b41d4c444e'; // Replace with secure key
 
 let waitingQueues = { 200: [], 500: [], 1000: [], 2000: [], 5000: [] };
 let activeRooms = new Map();
