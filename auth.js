@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Joi = require('joi');
-const { getUserByPhone, createUser, updateUserProfile } = require('./db');
+const { getUserByPhone, createUser, updateUserProfile, getUserById } = require('./db');
 const logger = require('./logger');
 
 const router = express.Router();
